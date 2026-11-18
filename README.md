@@ -1,63 +1,56 @@
 # 云端 Agent 助手工作台
 
-面向单用户的浏览器 Agent 工作台。后端调用真实 OpenCode CLI，支持独立会话、可恢复的任务进展、文件分析和代码成果。
+在浏览器中交给 Agent 编程或文件整理任务。工作台通过 **OpenCode CLI** 调用真实模型，展示执行进展，交付可预览、可下载的文件，并保存每个会话的上下文。
 
-## 用 Docker 启动
+[代码任务与追问截图](docs/evidence/code-follow-up.png) · [文件分析截图](docs/evidence/report-preview.png) · [验收记录](docs/VALIDATION.md)
 
-1. 把 `.env.example` 复制为 `.env`。
-2. 填入兼容 OpenAI Chat Completions 的网关地址、API Key 和模型 ID。API 地址填写基地址，例如 `https://gateway.example/v1`。
-3. 启动服务并检查健康接口。
+## 启动
 
-```sh
+需要 Docker 和 Docker Compose，以及支持流式 OpenAI Chat Completions 和工具调用的模型网关。
+
+1. 将 [配置示例](.env.example) 复制为本地 `.env`。
+2. 填写 `AGENT_API_BASE_URL`、`AGENT_API_KEY` 和 `AGENT_MODEL`。基地址形如 `https://gateway.example/v1`。密钥通过服务端环境变量注入。
+3. 构建并启动。打开 [http://127.0.0.1:3000/](http://127.0.0.1:3000/)。
+
+~~~sh
+cp .env.example .env
+# 编辑 .env，填入实际网关地址、密钥和模型 ID
 docker compose up --build -d
 curl --fail http://127.0.0.1:3000/api/health
-```
+~~~
 
-打开 [http://127.0.0.1:3000/](http://127.0.0.1:3000/) 进入工作台。可以在 `.env` 里使用 `WORKBENCH_PORT` 修改宿主机端口。停止服务用 `docker compose down`。SQLite、文件与 OpenCode 上下文保存在 Compose 数据卷中。
+端口被占用时，在 `.env` 内设置 `WORKBENCH_PORT`，例如 3001。停止服务用 `docker compose down`。命名数据卷保存会话、任务事件、文件和 CLI 上下文。
 
 ## 浏览器演示
 
-1. 新建「CSV 汇总工具」会话，把 [sales.csv](demo/sales.csv) 拖进输入框。发送「用 Python 标准库编写 CSV 汇总工具，按商品汇总 amount，生成脚本和 unittest 并运行测试」。展开执行进展，查看真实读写和命令事件。用对话中的「预览」「下载」获取成果，点「文件」可打开或收起侧栏。
-2. 在代码任务运行期间新建「会议纪要整理」会话，把 [会议纪要.txt](demo/会议纪要.txt) 拖进输入框，要求生成 Markdown 行动清单。若代码任务仍在运行，材料任务会显示排队。检查报告中的负责人、日期和待确认事项。
-3. 关闭页面后重新打开。从左侧找回「CSV 汇总工具」，继续发「在现有代码上加 `--month YYYY-MM` 筛选并重跑测试」。用预览查看改动后的脚本，确认 2026-02 只汇总到 Notebook 80 和 Pen 25。
-4. 新发一轮任务并在执行中点「停止」，检查状态显示已取消，之前生成的文件仍可查看。模型服务遇到限流或超时时，进展区显示原因；「继续任务」将续接提示填入输入框，由用户确认发送。
+### 开发并继续修改代码
 
-## 发送任务并查看结果
+1. 新建「CSV 汇总工具」，把 [sales.csv](demo/sales.csv) 拖入输入框。发送「用 Python 标准库按商品汇总 amount，生成脚本和 unittest，并运行测试」。
+2. 展开「执行进展」查看读写和命令结果。助手结论后的文件可直接预览和下载。右上「文件」按钮打开或收起文件侧栏。
+3. 关闭页面再回来，从左侧找回会话。发送「在原脚本加入 `--month YYYY-MM` 筛选，并重跑测试」。验证更新后的文件和测试结果。
 
-以下需要 `curl` 和 `jq`。
+### 在另一个会话整理材料
 
-```sh
-base=http://127.0.0.1:3000
-session_id=$(curl --fail --silent "$base/api/sessions" \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"代码任务"}' | jq -r '.id')
-run_id=$(curl --fail --silent "$base/api/sessions/$session_id/messages" \
-  -H 'Content-Type: application/json' \
-  -d '{"content":"生成 outputs/hello.py，打印 Hello Workbench，并运行它验证。"}' | jq -r '.run.id')
-curl --fail -N "$base/api/runs/$run_id/events"
-curl --fail "$base/api/sessions/$session_id/files"
-curl --fail "$base/api/sessions/$session_id/files/download?path=outputs/hello.py" -o hello.py
-```
+新建「会议纪要整理」，拖入 [会议纪要.txt](demo/会议纪要.txt)，发送「提取行动项、负责人、截止日期和待确认事项，生成 Markdown 行动清单」。预览或下载报告，并切回原会话继续工作。如果之前的任务仍在执行，新任务显示「排队中」。
 
-上传材料时提交 `multipart/form-data` 的 `file` 字段。使用返回的 `path` 在消息中引用材料。向原会话提交新消息即可续接。
+## 查看实际产物
 
-```sh
-curl --fail "$base/api/sessions/$session_id/files" -F 'file=@meeting.txt'
-```
+从真实模型联调中导出的 [Python 脚本](demo/results/code/outputs/aggregate_sales.py)、[测试](demo/results/code/outputs/test_aggregate_sales.py) 和 [行动清单](demo/results/行动清单.md) 随仓库提供。代码演示可在不配置模型的情况下复验。
 
-接口清单与数据流见[设计方案](docs/DESIGN.md)。后端运行结果见[验证记录](docs/BACKEND_VALIDATION.md)。
+~~~sh
+cd demo/results/code
+python3 -m unittest discover -s outputs -q
+python3 outputs/aggregate_sales.py inputs/sales.csv --month 2026-02
+~~~
 
-## 额度与限制
+本次复验通过 35 项测试。筛选结果为 Notebook 80、Pen 25，合计 105。材料任务的三个行动项及待确认会议室可在行动清单中核对。[完整验证记录](docs/VALIDATION.md)
 
-- 每轮默认最多 12 次模型请求，每个 UTC 自然日最多 120 次。单次请求体默认上限 512 KiB，单次生成上限 4,096 token。可在 `.env` 调整。
-- 服务在向供应商发请求前持久化计数，默认以至少 1.5 秒间隔出站。供应商拒绝请求后，本轮调用中止。页面可从运行详情或终态事件读取尝试数、返回用量的请求数和已知 token 数。
-- 供应商遗漏用量时，仅汇总已收到的用量。请求及生成限制减少消耗，费用和剩余额度以供应商为准。
-- 默认只监听本机端口，一次执行一个任务。工作目录按会话分开，容器内的 Agent 以同一非 root 用户运行。应用用于可信任务和材料。
+## 实现取舍与限制
 
-需要 Node.js 24 或更新版本执行本地构建和测试。Vite 只用于构建浏览器资源，容器运行时由 Express 提供静态文件。
+- 工作台面向可信的单用户任务，端口默认绑定本机。一个任务运行时，可以进入其他会话、上传文件或提交下一项工作。
+- 关闭浏览器后后台继续执行。服务重启时恢复历史和文件，执行中的任务会标记为中断。用户可以取消当前任务，或在看到错误原因后决定是否续接。
+- OpenCode 的工具、消息和终态事件经后端持久化并通过 SSE 传给浏览器。界面依次展示执行进展、助手结论和成果文件。
+- 默认每轮最多 12 次模型请求，每个 UTC 自然日最多 120 次。代理限制单次输入和生成量，并控制出站间隔。供应商返回的用量随任务保存。
+- 单文件上传上限为 20 MiB。侧栏支持代码、Markdown 和常见文本格式预览。其他格式和较大文件可下载。会话工作目录分开，共享容器内的非 root 运行用户。
 
-```sh
-npm ci
-npm run build
-npm test
-```
+更多信息见[设计与接口](docs/DESIGN.md)和[后端联调记录](docs/BACKEND_VALIDATION.md)。开发环境使用 Node.js 24 或更新版本，本地运行 `npm ci`、`npm run build` 和 `npm test`。
