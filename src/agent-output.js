@@ -1,6 +1,7 @@
+import { relative, resolve, sep, isAbsolute } from 'node:path';
 import { readLines } from './lines.js';
 
-export function parseAgentOutput({ onEvent, onSession, redact }) {
+export function parseAgentOutput({ onEvent, onSession, redact, workspace }) {
   const output = { text: '', code: null, completed: false, sessionId: null };
   let eventCount = 0;
 
@@ -37,8 +38,24 @@ export function parseAgentOutput({ onEvent, onSession, redact }) {
       }
       case 'tool_use': {
         const tool = typeof part?.tool === 'string' ? redact(part.tool).slice(0, 80) : 'unknown';
-        const status = part?.state?.status === 'error' ? 'failed' : 'completed';
-        onEvent('tool', { tool, status });
+        const metadata = part?.state?.metadata;
+        const exitCode = tool === 'bash' && Number.isInteger(metadata?.exit) ? metadata.exit : null;
+        const toolFailed = part?.state?.status === 'error' || (exitCode !== null && exitCode !== 0);
+        const details = { tool, status: toolFailed ? 'failed' : 'completed' };
+        const filePath = part?.state?.input?.filePath;
+        if (workspace && ['read', 'edit', 'write'].includes(tool) && typeof filePath === 'string') {
+          const path = relative(workspace, resolve(workspace, filePath));
+          if (path && !path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path)) {
+            details.path = redact(path).slice(0, 240);
+          }
+        }
+        // 命令结果只保留退出码和测试摘要，完整命令输出不进入界面。
+        if (exitCode !== null) details.exitCode = exitCode;
+        if (tool === 'bash' && typeof metadata?.output === 'string') {
+          const summary = metadata.output.match(/(?:^|\n)Ran (\d+) tests? in [\d.]+s\s*\n\s*OK(?:\s|$)/);
+          if (exitCode === 0 && summary) details.testsPassed = Number(summary[1]);
+        }
+        onEvent('tool', details);
         break;
       }
       case 'text': {

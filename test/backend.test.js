@@ -8,7 +8,8 @@ import test from 'node:test';
 import { parseAgentOutput } from '../src/agent-output.js';
 import { createWorkspace, downloadFile, listFiles } from '../src/files.js';
 import { startGateway } from '../src/gateway.js';
-import { Runner, sessionPaths } from '../src/runner.js';
+import { Runner } from '../src/runner.js';
+import { sessionPaths } from '../src/workspace.js';
 import { Store } from '../src/store.js';
 
 test('JSONL 处理分块中文，忽略隐私字段并识别无效输出', () => {
@@ -204,4 +205,45 @@ test('上游限流和不完整的流显式失败，限流后重试不会出站',
     upstream.close();
     store.db.close();
   }
+});
+
+test('上传附件随消息持久化，跨会话引用在事务中拒绝', () => {
+  const store = new Store(':memory:');
+  try {
+    store.createSession('s1', 'A');
+    store.createSession('s2', 'B');
+    const path = 'inputs/fixture-会议纪要.txt';
+    store.recordUpload('upload1', 's1', path, '会议纪要.txt', 10);
+    assert.throws(() => store.enqueue('s2', '跨会话', [path]), { code: 'ATTACHMENT_NOT_FOUND' });
+    assert.equal(store.messages('s2', Number.MAX_SAFE_INTEGER, 20).length, 0);
+    assert.equal(store.latestRun('s2'), null);
+    const run = store.enqueue('s1', '读附件', [path]);
+    assert.deepEqual(store.claim().attachments, [path]);
+    store.finish(run.id, 'succeeded', { text: '完成', artifacts: { items: [{ path: 'outputs/report.md' }], limited: false } });
+    const message = store.messages('s1', Number.MAX_SAFE_INTEGER, 20).find(row => row.role === 'user');
+    assert.deepEqual(message.attachments, [{ path, name: '会议纪要.txt' }]);
+    assert.equal(message.artifacts.items[0].path, 'outputs/report.md');
+  } finally {
+    store.db.close();
+  }
+});
+
+test('工具事件只展示工作目录相对路径及受控测试结果', () => {
+  const observed = [];
+  const parser = parseAgentOutput({ workspace: '/workspace', redact: text => text,
+    onSession() {}, onEvent(_type, payload) { observed.push(payload); } });
+  for (const [tool, state] of [
+    ['write', { status: 'completed', input: { filePath: '/workspace/outputs/tool.py', content: 'secret' } }],
+    ['read', { status: 'completed', input: { filePath: '/workspace/../other.txt' } }],
+    ['bash', { status: 'completed', metadata: { exit: 1, output: 'raw run output' } }],
+    ['bash', { status: 'completed', metadata: { exit: 0, output: 'Ran 3 tests in 0.001s\n\nOK\n' } }],
+  ]) {
+    parser.write(Buffer.from(JSON.stringify({ type: 'tool_use', part: { tool, state } }) + '\n'));
+  }
+  assert.deepEqual(observed, [
+    { tool: 'write', status: 'completed', path: 'outputs/tool.py' },
+    { tool: 'read', status: 'completed' },
+    { tool: 'bash', status: 'failed', exitCode: 1 },
+    { tool: 'bash', status: 'completed', exitCode: 0, testsPassed: 3 },
+  ]);
 });

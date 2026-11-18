@@ -31,11 +31,17 @@ export class Store {
         content TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(run_id, role)
       );
       CREATE INDEX IF NOT EXISTS message_history ON messages(session_id, id DESC);
+      CREATE TABLE IF NOT EXISTS message_attachments (
+        message_id INTEGER NOT NULL REFERENCES messages(id),
+        position INTEGER NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+        PRIMARY KEY(message_id, position)
+      );
       CREATE TABLE IF NOT EXISTS run_events (
         id INTEGER PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
         type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS event_stream ON run_events(run_id, id);
+      CREATE INDEX IF NOT EXISTS event_type_by_run ON run_events(run_id, type);
       CREATE TABLE IF NOT EXISTS model_calls (
         id INTEGER PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), requested_at TEXT NOT NULL,
         prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER
@@ -88,8 +94,19 @@ export class Store {
   }
 
   messages(sessionId, before, limit) {
-    return this.sql('SELECT * FROM messages WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?')
-      .all(sessionId, before, limit);
+    return this.sql(`SELECT m.*, r.status AS run_status, r.error_code AS run_error_code,
+      CASE WHEN m.role = 'user' THEN (
+        SELECT payload FROM run_events WHERE run_id = m.run_id AND type = 'artifacts' LIMIT 1
+      ) END AS artifacts, (
+        SELECT json_group_array(json_object('path', path, 'name', name))
+        FROM (SELECT path, name FROM message_attachments WHERE message_id = m.id ORDER BY position)
+      ) AS attachments
+      FROM messages m JOIN runs r ON m.run_id = r.id
+      WHERE m.session_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`)
+      .all(sessionId, before, limit).map(message => ({
+        ...message, attachments: JSON.parse(message.attachments),
+        artifacts: message.artifacts ? JSON.parse(message.artifacts) : null,
+      }));
   }
 
   latestRun(sessionId) {
@@ -113,7 +130,7 @@ export class Store {
       .all(runId, after, limit).map(event => ({ ...event, payload: JSON.parse(event.payload) }));
   }
 
-  enqueue(sessionId, content) {
+  enqueue(sessionId, content, paths = []) {
     // 消息、任务和首个事件一起提交，页面不会看到没有任务的用户消息。
     return this.transaction(() => {
       this.session(sessionId);
@@ -127,8 +144,15 @@ export class Store {
       const time = now();
       this.sql("INSERT INTO runs (id, session_id, status, queued_at) VALUES (?, ?, 'queued', ?)")
         .run(id, sessionId, time);
-      this.sql("INSERT INTO messages (session_id, run_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)")
+      const message = this.sql("INSERT INTO messages (session_id, run_id, role, content, created_at) VALUES (?, ?, 'user', ?, ?)")
         .run(sessionId, id, content, time);
+      // 附件必须属于当前会话。消息、附件引用和任务在同一个事务里保存。
+      for (const [position, path] of paths.entries()) {
+        const file = this.sql('SELECT path, name FROM uploads WHERE session_id = ? AND path = ?').get(sessionId, path);
+        if (!file) throw new HttpError(400, 'ATTACHMENT_NOT_FOUND', '附件不存在于当前会话');
+        this.sql('INSERT INTO message_attachments VALUES (?, ?, ?, ?)')
+          .run(message.lastInsertRowid, position, file.path, file.name);
+      }
       this.sql('UPDATE sessions SET updated_at = ? WHERE id = ?').run(time, sessionId);
       this.append(id, 'status', { status: 'queued' }, time);
       return this.run(id);
@@ -148,6 +172,8 @@ export class Store {
       const time = now();
       this.sql("UPDATE runs SET status = 'running', started_at = ? WHERE id = ?").run(time, task.id);
       this.append(task.id, 'status', { status: 'running' }, time);
+      task.attachments = this.sql(`SELECT a.path FROM message_attachments a JOIN messages m ON m.id = a.message_id
+        WHERE m.run_id = ? AND m.role = 'user' ORDER BY a.position`).all(task.id).map(file => file.path);
       return task;
     });
   }
@@ -158,7 +184,7 @@ export class Store {
     if (result.changes !== 1) throw new Error('CLI_SESSION_MISMATCH');
   }
 
-  finish(id, status, { code = null, exitCode = null, text = null, expected = 'running' } = {}) {
+  finish(id, status, { code = null, exitCode = null, text = null, expected = 'running', artifacts } = {}) {
     // 最终消息、用量和状态事件一起写入，SSE 重连能完整重放终态。
     return this.transaction(() => {
       const time = now();
@@ -171,6 +197,7 @@ export class Store {
           .run(run.session_id, id, text, time);
       }
       this.sql('UPDATE sessions SET updated_at = ? WHERE id = ?').run(time, run.session_id);
+      if (artifacts) this.append(id, 'artifacts', artifacts, time);
       this.append(id, 'status', { status, code, usage: this.usage(id) }, time);
       return run;
     });

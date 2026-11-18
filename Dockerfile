@@ -1,3 +1,10 @@
+FROM node:24-bookworm-slim AS frontend-build
+WORKDIR /build
+COPY package*.json ./
+RUN npm ci --ignore-scripts --include=dev
+COPY frontend ./frontend
+RUN npm run build
+
 FROM node:24-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git python3 \
     && rm -rf /var/lib/apt/lists/* \
@@ -6,6 +13,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY src ./src
+COPY --from=frontend-build /build/dist ./dist
 ENV NODE_ENV=production DATA_DIR=/data HOST=0.0.0.0 PORT=3000
 USER node
 EXPOSE 3000

@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { once } from 'node:events';
 import Busboy from 'busboy';
 import { HttpError } from './config.js';
-import { sessionPaths } from './runner.js';
+import { sessionPaths } from './workspace.js';
 
 const hidden = name => name.startsWith('.') || ['node_modules', '__pycache__'].includes(name);
 const missing = () => new HttpError(404, 'FILE_NOT_FOUND', '文件不存在或不可访问');

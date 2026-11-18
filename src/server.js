@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { once } from 'node:events';
 import express from 'express';
 import { HttpError, loadConfig } from './config.js';
 import { Store } from './store.js';
-import { Runner, sessionPaths } from './runner.js';
+import { Runner } from './runner.js';
+import { sessionPaths } from './workspace.js';
 import { startGateway } from './gateway.js';
 import { createWorkspace, downloadFile, listFiles, uploadFile } from './files.js';
 
@@ -130,7 +132,11 @@ async function main() {
   });
   app.post('/api/sessions/:id/messages', (req, res) => {
     const content = input(req.body?.content, 16384, '消息');
-    const run = store.enqueue(req.params.id, content);
+    const attachments = req.body?.attachments ?? [];
+    if (!Array.isArray(attachments) || attachments.length > 10 ||
+        attachments.some(path => typeof path !== 'string' || path.length > 512) ||
+        new Set(attachments).size !== attachments.length) throw invalid('附件列表无效');
+    const run = store.enqueue(req.params.id, content, attachments);
     res.status(202).json({ run, eventsUrl: `/api/runs/${run.id}/events` });
     runner.wake();
   });
@@ -138,7 +144,13 @@ async function main() {
     const run = store.run(req.params.id);
     res.json({ run, usage: store.usage(run.id) });
   });
-  app.get('/api/runs/:id/events', (req, res) => streamEvents(req, res, store));
+  app.get('/api/runs/:id/events', (req, res) => {
+    if (req.query.format !== 'json') return streamEvents(req, res, store);
+    const run = store.run(req.params.id);
+    const after = cursor(req.query.after, '事件游标', 0);
+    const limit = cursor(req.query.limit, '分页大小', 50, 1, 100);
+    res.json(page(store.events(run.id, after, limit + 1), limit, 'id'));
+  });
   app.post('/api/runs/:id/cancel', (req, res) => {
     const run = runner.cancel(req.params.id);
     res.status(run.status === 'running' ? 202 : 200).json({ run });
@@ -168,6 +180,7 @@ async function main() {
     await pipeline(file.fd.createReadStream({ end: file.size - 1 }), res);
   });
 
+  app.use(express.static(fileURLToPath(new URL('../dist/', import.meta.url)), { redirect: false }));
   app.use((_req, _res, next) => next(new HttpError(404, 'ROUTE_NOT_FOUND', '接口不存在')));
   app.use((error, _req, res, next) => {
     if (res.headersSent) return next(error);

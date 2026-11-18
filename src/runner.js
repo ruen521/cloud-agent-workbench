@@ -3,15 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { mkdir } from 'node:fs/promises';
 import { join, delimiter } from 'node:path';
 import { parseAgentOutput } from './agent-output.js';
-
-export function sessionPaths(dataDir, id) {
-  const root = join(dataDir, 'sessions', id);
-  return {
-    root,
-    workspace: join(root, 'workspace'),
-    cliData: join(root, 'open-code-data'),
-  };
-}
+import { listFiles } from './files.js';
+import { sessionPaths } from './workspace.js';
 
 function terminate(child, signal) {
   if (!child.pid) return;
@@ -72,7 +65,10 @@ async function prepare(config, task, lease) {
   const args = ['run', '--format', 'json', '--agent', 'workbench', '--model', model];
   if (task.cli_session_id) args.push('--session', task.cli_session_id);
   else args.push('--title', 'Workbench session');
-  args.push('--', task.content);
+  const attachments = task.attachments.length ? `
+
+Uploaded attachment paths: ${JSON.stringify(task.attachments)}` : '';
+  args.push('--', task.content + attachments);
   return { args, environment, paths };
 }
 
@@ -138,14 +134,18 @@ export class Runner {
     const secrets = [this.config.key, lease.url, new URL(lease.url).pathname.slice(1)];
     const redact = value => secrets.reduce((text, secret) => text.replaceAll(secret, '[已隐藏]'), value);
     const parser = parseAgentOutput({
+      workspace: sessionPaths(this.config.dataDir, task.session_id).workspace,
       onEvent: (type, payload) => this.store.append(task.id, type, payload),
       onSession: id => this.store.recordCliSession(task.session_id, id),
       redact,
     });
     const timeout = setTimeout(() => this.stop(run, 'timed_out'), this.config.timeoutMs);
     timeout.unref();
+    let before;
+    let artifacts;
     try {
       const { args, environment, paths } = await prepare(this.config, task, lease);
+      if (!run.requested) before = await listFiles(this.config.dataDir, task.session_id, 0, 200);
       if (!run.requested) {
         // 明确列出子进程环境，只传本次任务的代理地址，模型 API 密钥留在服务端。
         const child = spawn(this.config.executable, args, {
@@ -181,6 +181,23 @@ export class Runner {
       lease.close();
     }
 
+    if (before) {
+      try {
+        // 以磁盘快照确认每轮变更，也能捕获通过 Shell 生成的成果。
+        const after = await listFiles(this.config.dataDir, task.session_id, 0, 200);
+        const previous = new Map(before.items.map(file => [file.path, file]));
+        const changes = after.items.filter(file => !file.path.startsWith('inputs/') &&
+          (previous.get(file.path)?.modifiedAt !== file.modifiedAt ||
+           previous.get(file.path)?.size !== file.size));
+        artifacts = {
+          items: changes.slice(0, 12),
+          limited: changes.length > 12 || before.limited || after.limited ||
+            before.nextCursor !== null || after.nextCursor !== null,
+        };
+      } catch {
+        failure ??= 'ARTIFACT_SCAN_FAILED';
+      }
+    }
     const state = parser.output;
     const code = failure ?? lease.error ?? state.code ??
       (exitCode !== 0 ? 'AGENT_EXIT_NONZERO' : null) ??
@@ -191,6 +208,7 @@ export class Runner {
       code: Object.hasOwn(statusCode, status) ? statusCode[status] : code,
       exitCode,
       text: state.text.trim() || null,
+      artifacts,
     });
   }
 }
