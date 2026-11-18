@@ -247,3 +247,36 @@ test('工具事件只展示工作目录相对路径及受控测试结果', () =>
     { tool: 'bash', status: 'completed', exitCode: 0, testsPassed: 3 },
   ]);
 });
+
+test('历史消息和浏览器均只把最后成功步骤的文字作为答复', async () => {
+  const { summarizeTurn } = await import('../frontend/src/turn-events.js');
+  const store = new Store(':memory:');
+  try {
+    store.createSession('s1', '任务');
+    const run = store.enqueue('s1', '生成报告');
+    store.claim();
+    const parser = parseAgentOutput({ redact: value => value, onSession() {},
+      onEvent(type, payload) { store.append(run.id, type, payload); } });
+    for (const [type, part] of [
+      ['step_start'], ['text', { text: '我先检查材料。' }], ['tool_use', { tool: 'read' }],
+      ['step_finish', { reason: 'tool-calls' }], ['step_start'],
+      ['text', { text: '报告已生成。' }], ['text', { text: '已核对负责人。' }],
+      ['step_finish', { reason: 'stop' }],
+    ]) {
+      parser.write(Buffer.from(JSON.stringify({ type, part, sessionID: 'ses_fixture' }) + '\n'));
+    }
+    assert.equal(parser.output.finalText, '报告已生成。\n\n已核对负责人。');
+    const events = store.events(run.id, 0, 50);
+    assert.equal(summarizeTurn(events, 'running').finalText, '');
+    assert.equal(summarizeTurn(events, 'failed').finalText, '');
+    const view = summarizeTurn(events, 'succeeded');
+    assert.equal(view.finalText, parser.output.finalText);
+    assert.deepEqual(view.progress.map(event => event.type), ['text', 'tool']);
+    // 模拟上一版已保存的答复，验证折叠进展时历史仍可显示干净的结论。
+    store.finish(run.id, 'succeeded', { text: parser.output.text });
+    const reply = store.messages('s1', Number.MAX_SAFE_INTEGER, 20).find(row => row.role === 'assistant');
+    assert.equal(reply.content, view.finalText);
+  } finally {
+    store.db.close();
+  }
+});

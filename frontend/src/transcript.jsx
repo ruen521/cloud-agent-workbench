@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowDownToLine, Check, ChevronDown, FileText, Paperclip, Terminal } from 'lucide-react';
+import { AlertTriangle, ArrowDownToLine, Check, ChevronDown, FileText, MessageSquare, Paperclip, Terminal } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { summarizeTurn } from './turn-events.js';
 import { active, errorLabel, fileUrl, json, runUrl, statusLabels } from './api.js';
 
 export function Markdown({ children }) {
@@ -92,16 +93,11 @@ export function Turn({ message, answer, latest, sessionId, files, onPreview, onR
   const terminal = events.findLast(event => event.type === 'status')?.payload;
   const status = terminal?.status ?? message.run_status;
   const error = terminal?.code ?? message.run_error_code;
-  const recentText = events.filter(event => event.type === 'text').map(event => event.payload.text).join('\n\n');
-  const text = answer?.content ?? recentText;
-  const tools = events.filter(event => event.type === 'tool');
+  const { progress, finalText } = summarizeTurn(events, status);
+  const text = status === 'succeeded' ? answer?.content ?? finalText : '';
   const listed = events.findLast(event => event.type === 'artifacts')?.payload ?? message.artifacts;
   const fileByPath = new Map(files.map(file => [file.path, file]));
-  const knownWrites = new Set(tools.filter(event => ['write', 'edit'].includes(event.payload.tool) &&
-    event.payload.status === 'completed').map(event => event.payload.path));
-  // 执行中只展示工具确认过、且文件接口已经看得到的产物。
-  const interim = files.filter(file => !file.path.startsWith('inputs/') && knownWrites.has(file.path));
-  const artifacts = (listed?.items ?? interim).filter(file => fileByPath.has(file.path) || !latest);
+  const artifacts = active(status) ? [] : listed?.items ?? [];
   const showError = ['failed', 'interrupted', 'timed_out'].includes(status);
 
   return <section className="turn" aria-label="任务记录">
@@ -113,18 +109,20 @@ export function Turn({ message, answer, latest, sessionId, files, onPreview, onR
       </div>}
     </div>
     <div className="assistant-turn">
-      {text && <Markdown>{text}</Markdown>}
       <div className="activities">
         <button type="button" className="activity-toggle" aria-expanded={expanded}
           onClick={() => setExpanded(value => !value)}>
           <Terminal aria-hidden="true" />执行进展<ChevronDown className={expanded ? '' : 'collapsed'} aria-hidden="true" />
         </button>
         {expanded && <ul className="activity-list" aria-live={live ? 'polite' : 'off'}>
-          {tools.map(event => <ToolLine key={event.id} payload={event.payload} />)}
+          {progress.map(event => event.type === 'tool' ? <ToolLine key={event.id} payload={event.payload} /> :
+            <li className="progress-message" key={event.id}>
+              <MessageSquare aria-hidden="true" /><Markdown>{event.payload.text}</Markdown>
+            </li>)}
           {active(status) && <li><span className={'indicator ' + status} /><span>{statusLabels[status]}</span></li>}
           {showError && <li><AlertTriangle className="warning-icon" /><span>{errorLabel(error)}</span></li>}
           {status === 'cancelled' && <li><span>已取消</span></li>}
-          {status === 'succeeded' && tools.length === 0 && <li><Check className="check-icon" /><span>已完成</span></li>}
+          {status === 'succeeded' && progress.length === 0 && <li><Check className="check-icon" /><span>已完成</span></li>}
           {problem && <li role="status"><span>{problem}</span></li>}
         </ul>}
       </div>
@@ -132,6 +130,7 @@ export function Turn({ message, answer, latest, sessionId, files, onPreview, onR
         <span>{artifacts.length ? '生成的文件已保留。' : errorLabel(error)}</span>
         <button type="button" onClick={onContinue}>继续任务</button>
       </div>}
+      {text && <Markdown>{text}</Markdown>}
       <div className="artifacts">
         {artifacts.map(file => <Artifact key={file.path} sessionId={sessionId}
           file={fileByPath.get(file.path) ?? file} onPreview={onPreview} />)}

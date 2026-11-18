@@ -269,7 +269,8 @@ export function SessionView({ id, refreshSessions, openNavigation }) {
   const status = detail?.latestRun?.status;
   const selected = files.find(file => file.path === selection?.path) ?? selection;
   const answers = new Map(detail?.messages.filter(message => message.role === 'assistant').map(message => [message.run_id, message]));
-  const standaloneAnswer = detail?.messages[0]?.role === 'assistant' ? detail.messages[0] : null;
+  const first = detail?.messages[0];
+  const standaloneAnswer = first?.role === 'assistant' && first.run_status === 'succeeded' ? first : null;
 
   return <div className={'session-space' + (drawer ? ' drawer-open' : '')}>
     <main className="conversation">

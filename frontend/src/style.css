@@ -132,6 +132,9 @@ svg { width: 1.05em; height: 1.05em; flex: 0 0 auto; stroke-width: 1.75; vertica
   border-left: 3px solid #dfe7de; font-size: .98em;
 }
 .activity-list li { display: flex; align-items: center; min-height: 38px; gap: 13px; margin: 2px 0; }
+.activity-list .progress-message { align-items: flex-start; color: var(--muted); }
+.progress-message > svg { margin-top: .35em; color: var(--jade); }
+.progress-message .markdown { min-width: 0; }
 .indicator { display: inline-block; flex: 0 0 auto; width: .95em; height: .95em; border-radius: 50%; }
 .indicator.running, .indicator.queued { border: 2px solid #b8d3c8; border-top-color: var(--jade); }
 .indicator.running { animation: spin 1.05s linear infinite; }

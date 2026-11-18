@@ -97,14 +97,33 @@ export class Store {
     return this.sql(`SELECT m.*, r.status AS run_status, r.error_code AS run_error_code,
       CASE WHEN m.role = 'user' THEN (
         SELECT payload FROM run_events WHERE run_id = m.run_id AND type = 'artifacts' LIMIT 1
-      ) END AS artifacts, (
+      ) END AS artifacts,
+      CASE WHEN m.role = 'assistant' AND r.status = 'succeeded' THEN (
+        WITH final_step AS (
+          SELECT id FROM run_events WHERE run_id = m.run_id AND type = 'step'
+            AND json_extract(payload, '$.reason') = 'stop' ORDER BY id DESC LIMIT 1
+        ), start_step AS (
+          SELECT id FROM run_events WHERE run_id = m.run_id AND type = 'step'
+            AND json_extract(payload, '$.status') = 'started' AND id < (SELECT id FROM final_step)
+            ORDER BY id DESC LIMIT 1
+        )
+        SELECT group_concat(text, char(10) || char(10)) FROM (
+          SELECT json_extract(payload, '$.text') AS text FROM run_events
+          WHERE run_id = m.run_id AND type = 'text'
+            AND id > coalesce((SELECT id FROM start_step), 0) AND id < (SELECT id FROM final_step)
+          ORDER BY id
+        )
+      ) END AS final_content, (
         SELECT json_group_array(json_object('path', path, 'name', name))
         FROM (SELECT path, name FROM message_attachments WHERE message_id = m.id ORDER BY position)
       ) AS attachments
       FROM messages m JOIN runs r ON m.run_id = r.id
       WHERE m.session_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?`)
-      .all(sessionId, before, limit).map(message => ({
-        ...message, attachments: JSON.parse(message.attachments),
+      // 旧会话的答复曾把过程说明一起保存，从同一批持久化事件恢复最终答复。
+      .all(sessionId, before, limit).map(({ final_content, ...message }) => ({
+        ...message,
+        content: final_content ?? message.content,
+        attachments: JSON.parse(message.attachments),
         artifacts: message.artifacts ? JSON.parse(message.artifacts) : null,
       }));
   }

@@ -2,8 +2,9 @@ import { relative, resolve, sep, isAbsolute } from 'node:path';
 import { readLines } from './lines.js';
 
 export function parseAgentOutput({ onEvent, onSession, redact, workspace }) {
-  const output = { text: '', code: null, completed: false, sessionId: null };
+  const output = { text: '', finalText: '', code: null, completed: false, sessionId: null };
   let eventCount = 0;
+  let stepText = [];
 
   // 只发布稳定的业务字段。工具参数、完整输出和模型思考内容不进入浏览器事件。
   const reader = readLines(line => {
@@ -26,12 +27,16 @@ export function parseAgentOutput({ onEvent, onSession, redact, workspace }) {
     const part = event.part;
     switch (event.type) {
       case 'step_start':
+        stepText = [];
+        output.finalText = '';
         output.completed = false;
         onEvent('step', { status: 'started' });
         break;
       case 'step_finish': {
         const reason = typeof part?.reason === 'string' ? redact(part.reason).slice(0, 60) : null;
         output.completed = reason === 'stop';
+        // 结束工具调用的轮次属于过程说明，正常结束的最后一步才形成答复。
+        output.finalText = output.completed ? stepText.join('\n\n') : '';
         if (reason === 'length') output.code = 'MODEL_OUTPUT_LIMIT';
         onEvent('step', { status: 'finished', reason });
         break;
@@ -63,6 +68,7 @@ export function parseAgentOutput({ onEvent, onSession, redact, workspace }) {
         const text = redact(part.text);
         if (output.text.length + text.length > 65536) throw new Error('AGENT_OUTPUT_LIMIT');
         output.text += (output.text ? '\n\n' : '') + text;
+        stepText.push(text);
         onEvent('text', { text });
         break;
       }

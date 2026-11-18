@@ -31,7 +31,7 @@ async function prepare(config, task, lease) {
       workbench: {
         mode: 'primary',
         steps: config.maxCallsPerRun,
-        prompt: 'Work in the current session directory. User materials are in inputs/. Put requested deliverables in outputs/ unless asked otherwise. Use tools only when needed, verify changes, and report outcomes and limitations concisely in the user’s language.',
+        prompt: 'Work in the current session directory. User materials are in inputs/. Put requested deliverables in outputs/ unless asked otherwise. Use tools only when needed. When useful, give a short user-facing progress update about the next action or what was verified. End with a clear result in the user’s language.',
         permission: { question: 'deny', task: 'deny', webfetch: 'deny', websearch: 'deny',
           todowrite: 'deny', todoread: 'deny', skill: 'deny', codesearch: 'deny' },
       },
@@ -201,13 +201,13 @@ export class Runner {
     const state = parser.output;
     const code = failure ?? lease.error ?? state.code ??
       (exitCode !== 0 ? 'AGENT_EXIT_NONZERO' : null) ??
-      (!state.completed || !state.sessionId || !state.text.trim() ? 'AGENT_NO_VALID_OUTPUT' : null);
+      (!state.completed || !state.sessionId || !state.finalText.trim() ? 'AGENT_NO_VALID_OUTPUT' : null);
     const status = run.requested ?? (code ? 'failed' : 'succeeded');
     const statusCode = { timed_out: 'RUN_TIMEOUT', interrupted: 'SERVICE_STOPPED', cancelled: null };
     this.store.finish(task.id, status, {
       code: Object.hasOwn(statusCode, status) ? statusCode[status] : code,
       exitCode,
-      text: state.text.trim() || null,
+      text: status === 'succeeded' ? state.finalText.trim() : null,
       artifacts,
     });
   }
